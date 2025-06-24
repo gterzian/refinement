@@ -26,7 +26,7 @@ struct ImageCache {
 }
 
 fn all_images_loaded(cache: &ImageCache) -> bool {
-    cache.image_states.iter().all(|&s| s == ImageState::Loaded)
+    cache.image_states.iter().all(|&s| s == ImageState::Loaded) && cache.image_queue.is_empty()
 }
 
 fn main() {
@@ -68,7 +68,7 @@ fn main() {
                     continue;
                 }
 
-                // StartKeyGeneration
+                // StartKeyGeneration + GenerateKeys (merged, race-free)
                 let keys_requested = cache
                     .image_states
                     .iter()
@@ -76,37 +76,18 @@ fn main() {
                     .count();
                 let keys_needed = keys_requested.saturating_sub(cache.keys.len());
                 if !cache.pending_keys && keys_requested > 0 {
-                    cache.pending_keys = keys_needed > 0;
-                    println!(
-                        "Thread {}: StartKeyGeneration (keys_needed: {}, pending_keys: {})",
-                        thread_id, keys_needed, cache.pending_keys
-                    );
-                    cvar.notify_all();
-                    continue;
-                }
-
-                // GenerateKeys
-                if cache.pending_keys {
-                    let keys_requested = cache
-                        .image_states
-                        .iter()
-                        .filter(|&&s| s == ImageState::PendingKey)
-                        .count();
-                    let keys_needed = keys_requested.saturating_sub(cache.keys.len());
                     if keys_needed > 0 {
-                        println!("Thread {}: GenerateKeys ({} keys)", thread_id, keys_needed);
-                        // Simulate compute-intensive work
-                        drop(cache);
+                        println!(
+                            "Thread {}: StartKeyGeneration+GenerateKeys ({} keys)",
+                            thread_id, keys_needed
+                        );
+                        cache.pending_keys = true;
+                        drop(cache); // Release the lock before intensive work
                         thread::sleep(Duration::from_millis(100));
                         let mut cache = lock.lock().unwrap();
                         for _ in 0..keys_needed {
                             cache.keys.push_back(Key);
                         }
-                        cache.pending_keys = false;
-                        cvar.notify_all();
-                        continue;
-                    } else {
-                        // No keys needed, just reset pending_keys
                         cache.pending_keys = false;
                         cvar.notify_all();
                         continue;
