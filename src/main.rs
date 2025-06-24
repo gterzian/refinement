@@ -22,12 +22,11 @@ struct ImageCache {
     image_queue: VecDeque<usize>,
     keys_used: usize,
     keys: VecDeque<Key>,
-    keys_generated: VecDeque<Key>,
-    keys_batch: bool,
+    pending_keys: bool,
 }
 
 fn all_images_loaded(cache: &ImageCache) -> bool {
-    cache.image_states.iter().all(|&s| s == ImageState::Loaded) && cache.image_queue.is_empty()
+    cache.image_states.iter().all(|&s| s == ImageState::Loaded)
 }
 
 fn main() {
@@ -36,8 +35,7 @@ fn main() {
         image_queue: VecDeque::new(),
         keys_used: 0,
         keys: VecDeque::new(),
-        keys_generated: VecDeque::new(),
-        keys_batch: false,
+        pending_keys: false,
     };
 
     let shared_state = Arc::new((Mutex::new(image_cache), Condvar::new()));
@@ -58,7 +56,11 @@ fn main() {
                 }
 
                 // StartLoad(i)
-                if let Some(i) = cache.image_states.iter().position(|&s| s == ImageState::None) {
+                if let Some(i) = cache
+                    .image_states
+                    .iter()
+                    .position(|&s| s == ImageState::None)
+                {
                     println!("Thread {}: StartLoad({})", thread_id, i);
                     cache.image_states[i] = ImageState::PendingKey;
                     cache.image_queue.push_back(i);
@@ -66,36 +68,49 @@ fn main() {
                     continue;
                 }
 
-                // StartGenerateKeys
-                let keys_requested = cache.image_states.iter().filter(|&&s| s == ImageState::PendingKey).count();
-                if keys_requested > 0 && cache.keys_generated.len() < N * 2 {
+                // StartKeyGeneration
+                let keys_requested = cache
+                    .image_states
+                    .iter()
+                    .filter(|&&s| s == ImageState::PendingKey)
+                    .count();
+                let keys_needed = keys_requested.saturating_sub(cache.keys.len());
+                if !cache.pending_keys && keys_requested > 0 {
+                    cache.pending_keys = keys_needed > 0;
+                    println!(
+                        "Thread {}: StartKeyGeneration (keys_needed: {}, pending_keys: {})",
+                        thread_id, keys_needed, cache.pending_keys
+                    );
+                    cvar.notify_all();
+                    continue;
+                }
+
+                // GenerateKeys
+                if cache.pending_keys {
+                    let keys_requested = cache
+                        .image_states
+                        .iter()
+                        .filter(|&&s| s == ImageState::PendingKey)
+                        .count();
                     let keys_needed = keys_requested.saturating_sub(cache.keys.len());
                     if keys_needed > 0 {
-                        println!("Thread {}: StartGenerateKeys ({} keys)", thread_id, keys_needed);
-                        // Move the compute-intensive work outside the critical section
-                        drop(cache); // Release the lock
-                        thread::sleep(std::time::Duration::from_millis(100));
-                        let mut cache = lock.lock().unwrap(); // Reacquire the lock
+                        println!("Thread {}: GenerateKeys ({} keys)", thread_id, keys_needed);
+                        // Simulate compute-intensive work
+                        drop(cache);
+                        thread::sleep(Duration::from_millis(100));
+                        let mut cache = lock.lock().unwrap();
                         for _ in 0..keys_needed {
-                            cache.keys_generated.push_back(Key);
+                            cache.keys.push_back(Key);
                         }
-                        cache.keys_batch = true; // Set unconditionally here, per spec
+                        cache.pending_keys = false;
                         cvar.notify_all();
                         continue;
                     } else {
-                        cache.keys_batch = true; // Set even if no keys are needed
+                        // No keys needed, just reset pending_keys
+                        cache.pending_keys = false;
                         cvar.notify_all();
+                        continue;
                     }
-                }
-
-                // DoneGenerateKeys
-                if !cache.keys_generated.is_empty() {
-                    println!("Thread {}: DoneGenerateKeys (moving {} keys)", thread_id, cache.keys_generated.len());
-                    while let Some(k) = cache.keys_generated.pop_front() {
-                        cache.keys.push_back(k);
-                    }
-                    cvar.notify_all();
-                    continue;
                 }
 
                 // Actions on the image at the front of the queue
@@ -103,7 +118,7 @@ fn main() {
                     let state = cache.image_states[front_image_idx];
 
                     // SetKey(i)
-                    if state == ImageState::PendingKey && !cache.keys.is_empty() && cache.keys_batch {
+                    if state == ImageState::PendingKey && !cache.keys.is_empty() {
                         println!("Thread {}: SetKey({})", thread_id, front_image_idx);
                         cache.keys.pop_front();
                         cache.image_states[front_image_idx] = ImageState::HasKey;
@@ -122,7 +137,6 @@ fn main() {
                     if state == ImageState::Loaded {
                         println!("Thread {}: DequeImage({})", thread_id, front_image_idx);
                         cache.image_queue.pop_front();
-                        cache.keys_batch = false;
                         cvar.notify_all();
                         continue;
                     }
