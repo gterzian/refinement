@@ -70,16 +70,22 @@ fn main() {
                 let keys_requested = cache.image_states.iter().filter(|&&s| s == ImageState::PendingKey).count();
                 if keys_requested > 0 && cache.keys_generated.len() < N * 2 {
                     let keys_needed = keys_requested.saturating_sub(cache.keys.len());
-                    println!("Thread {}: StartGenerateKeys ({} keys)", thread_id, keys_needed);
                     if keys_needed > 0 {
-                        // Simulate compute-intensive work
+                        println!("Thread {}: StartGenerateKeys ({} keys)", thread_id, keys_needed);
+                        // Move the compute-intensive work outside the critical section
+                        drop(cache); // Release the lock
                         thread::sleep(std::time::Duration::from_millis(100));
+                        let mut cache = lock.lock().unwrap(); // Reacquire the lock
                         for _ in 0..keys_needed {
                             cache.keys_generated.push_back(Key);
                         }
+                        cache.keys_batch = true; // Set unconditionally here, per spec
+                        cvar.notify_all();
+                        continue;
+                    } else {
+                        cache.keys_batch = true; // Set even if no keys are needed
+                        cvar.notify_all();
                     }
-                    cache.keys_batch = true; // Set unconditionally here, per spec
-                    cvar.notify_all();
                 }
 
                 // DoneGenerateKeys
